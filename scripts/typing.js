@@ -1,417 +1,261 @@
-// scripts/typing.js
-// Typing engine for SebType
-// Exports: TypingEngine class
-//
-// Responsibilities:
-// - Word generation for multiple modes (english/numbers/quotes) via a provided dictionary
-// - Tracks typed input, per-character correctness, word completion
-// - Maintains stats: raw chars, correct chars, WPM estimation, accuracy, consistency
-// - Emits events via simple callback registration (onStart, onTick, onFinish, onUpdateWordState)
-// - Persists best results to localStorage
-//
-// Usage:
-// import { TypingEngine } from './typing.js'
-// const engine = new TypingEngine({ words: ['...'], timeLimit: 60 })
-// engine.onStart = () => {}
-// engine.onTick = ({ timeLeft, elapsed }) => {}
-// engine.processKeystroke('a') or engine.processInput(value)
-// engine.tick() is used by timer if desired
-//
-// Notes: built to be robust and standalone for integration with UI.
+// scripts/ui.js
+// SebType UI helper that manages DOM widgets, panels, simple animations, and ties to Typing & Timer
+// Provides a defensive UI layer that main.js and other modules can rely on.
+// Exposes global UI with some helper callbacks and small utilities:
+// - UI.init(), UI.showSavedToast(msg), UI.onModeChange(mode), UI.onNewRun(rec)
 
-const DEFAULT_WORDS = [
-  "the","and","to","of","a","in","that","it","is","was","i","for","on","you","he","be","with",
-  "as","by","at","have","are","this","not","but","had","his","they","from","she","which","or",
-  "we","an","there","their","one","all","would","when","who","what","so","up","out","if","about",
-  "get","can","like","me","just","him","know","take","into","your","good","some","could","them",
-  "see","other","than","then","now","look","only","come","its","over","think","also","back","after",
-  "use","two","how","our","work","first","well","way","even","new","want","because","any","these",
-  "give","day","most","us"
-]
+(function (global) {
+  const UI = {
+    // DOM refs (filled in init)
+    elements: {},
+    // small toast timer
+    _toastTimer: null,
+    init() {
+      this._queryElements()
+      this._wireBasicControls()
+      console.log('%c[UI] Initialized', 'color:#37e67d')
+      return this
+    },
 
-// small helper: shuffle an array shallow copy
-function shuffleArray(arr) {
-  const a = arr.slice()
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    ;[a[i], a[j]] = [a[j], a[i]]
-  }
-  return a
-}
+    _queryElements() {
+      const doc = document
+      const el = this.elements
+      el.app = doc.getElementById('app') || doc.body
+      el.navbar = doc.getElementById('navbar')
+      el.btnModes = doc.getElementById('btn-modes')
+      el.btnStats = doc.getElementById('btn-stats')
+      el.btnSettings = doc.getElementById('btn-settings')
+      el.wordStream = doc.getElementById('word-stream') || doc.getElementById('word-area')
+      el.hiddenInput = doc.getElementById('hidden-input') || doc.getElementById('input-box')
+      el.timerDisplay = doc.getElementById('timer-display')
+      el.modeDisplay = doc.getElementById('mode-display')
+      el.accuracyDisplay = doc.getElementById('accuracy-display')
+      el.results = doc.getElementById('results')
+      el.resultsWpm = doc.getElementById('stat-wpm')
+      el.resultsRaw = doc.getElementById('stat-raw')
+      el.resultsAcc = doc.getElementById('stat-acc')
+      el.resultsTime = doc.getElementById('stat-time')
+      el.graph = doc.getElementById('graph')
+      el.restartBtn = doc.getElementById('restart-btn') || doc.querySelector('#results button')
+      el.footer = doc.querySelector('footer')
+      el.errorBox = doc.getElementById('error-box') // optional
+      // fallback creation if important elements missing will be handled by main.js ensureBaseUI
+    },
 
-// clamp value
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
-
-// smoothing helper for consistency
-function stddev(values) {
-  if (!values.length) return 0
-  const mean = values.reduce((s, v) => s + v, 0) / values.length
-  const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length
-  return Math.sqrt(variance)
-}
-
-export class TypingEngine {
-  constructor(opts = {}) {
-    // config
-    this.timeLimit = opts.timeLimit || 60 // seconds
-    this.mode = opts.mode || 'english' // english | numbers | quotes
-    this.wordsPool = opts.words || DEFAULT_WORDS
-    this.seedSize = opts.seedSize || 200 // how many words to generate for a test
-    this.spaceCountsAsChar = true
-
-    // state
-    this.words = []             // array of words for this test
-    this.currentWordIndex = 0   // index into words array
-    this.currentInput = ''      // current content of the input field (for current word)
-    this.startedAt = null       // timestamp in ms
-    this.endedAt = null         // timestamp in ms
-    this.started = false
-    this.finished = false
-    this.timeLeft = this.timeLimit
-
-    // stats
-    this.typedChars = 0         // every char typed (including spaces)
-    this.correctChars = 0       // correctly typed chars (including spaces for completed words)
-    this.wordHistory = []       // per-word results: { typed, correct, word, timeTaken }
-    this.wpmHistory = []        // last N wpm snapshots (for graph)
-    this.tickIntervalMs = 1000  // how frequently to sample wpm history
-    this.lastTickAt = null
-
-    // event callbacks (can be overridden)
-    this.onStart = null
-    this.onTick = null
-    this.onFinish = null
-    this.onUpdateWordState = null // called whenever current word correctness changes
-
-    // hooks for persisting best scores
-    this.localStorageKey = opts.localStorageKey || 'sebtype:best'
-    this.best = this._loadBest() || { wpm: 0, accuracy: 0, raw: 0 }
-
-    // initialize words immediately
-    this.resetTest()
-  }
-
-  _loadBest() {
-    try {
-      const raw = localStorage.getItem(this.localStorageKey)
-      if (!raw) return null
-      return JSON.parse(raw)
-    } catch (e) {
-      console.warn('sebtype: failed to load best', e)
-      return null
-    }
-  }
-
-  _saveBest() {
-    try {
-      localStorage.setItem(this.localStorageKey, JSON.stringify(this.best))
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  // generate a words array according to mode + pool
-  generateWords(count = this.seedSize) {
-    if (this.mode === 'numbers') {
-      // produce numeric tokens including combos
-      const out = []
-      for (let i = 0; i < count; i++) {
-        // mix digits and small numbers
-        const r = Math.random()
-        if (r > 0.8) out.push(String(Math.floor(Math.random() * 9000) + 100)) // 100-9999
-        else if (r > 0.5) out.push(String(Math.floor(Math.random() * 100))) // 0-99
-        else out.push(String(Math.floor(Math.random() * 10))) // 0-9
+    _wireBasicControls() {
+      const el = this.elements
+      // nav buttons are wired in main.js too but we set safe listeners here so UI behaves if main.js missing
+      if (el.btnModes && !el.btnModes._wired) {
+        el.btnModes.addEventListener('click', (e) => {
+          if (typeof global.openModesPanel === 'function') return global.openModesPanel()
+          // otherwise fallback to show a tiny notice
+          this.showSavedToast('Modes panel (no main handler)')
+        })
+        el.btnModes._wired = true
       }
-      return out
-    }
-    if (this.mode === 'quotes') {
-      // sample fragments from longer sentences
-      const sampleQuotes = [
-        "To be or not to be",
-        "I think therefore I am",
-        "There is no substitute for hard work",
-        "All that glitters is not gold",
-        "The only limit to our realization of tomorrow is our doubts of today",
-        "Life is what happens when you're busy making other plans",
-        "Get busy living or get busy dying"
-      ]
-      const out = []
-      while (out.length < count) {
-        const q = sampleQuotes[Math.floor(Math.random() * sampleQuotes.length)]
-        const parts = q.split(' ')
-        // take slices from the quote
-        for (let i = 0; i < parts.length && out.length < count; i++) {
-          out.push(parts[i])
+      if (el.btnSettings && !el.btnSettings._wired) {
+        el.btnSettings.addEventListener('click', (e) => {
+          if (typeof global.openSettingsPanel === 'function') return global.openSettingsPanel()
+          this.showSavedToast('Settings (no main handler)')
+        })
+        el.btnSettings._wired = true
+      }
+      if (el.btnStats && !el.btnStats._wired) {
+        el.btnStats.addEventListener('click', (e) => {
+          if (typeof global.openStatsPanel === 'function') return global.openStatsPanel()
+          this.showSavedToast('Stats (no main handler)')
+        })
+        el.btnStats._wired = true
+      }
+
+      // clicking the word stream focuses the hidden input for quick typing
+      if (el.wordStream && !el.wordStream._wired) {
+        el.wordStream.addEventListener('click', () => {
+          try {
+            if (el.hiddenInput) el.hiddenInput.focus()
+          } catch (e) {}
+        })
+        el.wordStream._wired = true
+      }
+
+      // restart button
+      if (el.restartBtn && !el.restartBtn._wired) {
+        el.restartBtn.addEventListener('click', () => {
+          // call Typing.reset if available, else reload
+          if (typeof global.Typing !== 'undefined' && Typing && typeof Typing.reset === 'function') {
+            Typing.reset()
+          } else {
+            // fallback: reload page only if nothing else
+            // location.reload()
+            this.showSavedToast('Reset! (typing module not present)')
+          }
+          // hide results
+          if (el.results) el.results.classList.add('hidden')
+          if (el.hiddenInput) {
+            el.hiddenInput.value = ''
+            try { el.hiddenInput.focus({ preventScroll: true }) } catch (e) { el.hiddenInput.focus() }
+          }
+        })
+        el.restartBtn._wired = true
+      }
+
+      // hidden input safe wiring for quick local UI reaction (will forward to Typing via main.js normally)
+      if (el.hiddenInput && !el.hiddenInput._wired) {
+        el.hiddenInput.addEventListener('keydown', (ev) => {
+          // prevent arrows from scrolling the page when focused invisibly
+          if (['ArrowUp','ArrowDown','PageUp','PageDown'].includes(ev.key)) ev.preventDefault()
+        })
+        el.hiddenInput._wired = true
+      }
+    },
+
+    renderWordStream(wordStateOrList) {
+      // Accept either a typing-style currentWordState or a plain array of words.
+      const elWS = this.elements.wordStream
+      if (!elWS) return
+      try {
+        // If provided a state object with .word and .chars, render the visible window with highlighting
+        if (wordStateOrList && Array.isArray(wordStateOrList.words)) {
+          // full list (rare)
+          const arr = wordStateOrList.words
+          elWS.innerHTML = ''
+          arr.slice(0, 60).forEach((w, i) => {
+            const s = document.createElement('span')
+            s.className = 'word'
+            s.textContent = w + ' '
+            elWS.appendChild(s)
+          })
+          return
         }
-      }
-      return out
-    }
 
-    // default english mode
-    // shuffle and repeat to reach count
-    const pool = shuffleArray(this.wordsPool)
-    const result = []
-    while (result.length < count) {
-      result.push(...pool)
-    }
-    return result.slice(0, count)
-  }
-
-  // reset state and generate fresh words
-  resetTest() {
-    clearInterval(this._historyInterval)
-    this.words = this.generateWords(this.seedSize)
-    this.currentWordIndex = 0
-    this.currentInput = ''
-    this.startedAt = null
-    this.endedAt = null
-    this.started = false
-    this.finished = false
-    this.timeLeft = this.timeLimit
-    this.typedChars = 0
-    this.correctChars = 0
-    this.wordHistory = []
-    this.wpmHistory = []
-    this.lastTickAt = Date.now()
-    // warm initial history
-    for (let i = 0; i < 5; i++) this.wpmHistory.push(0)
-    // notify UI
-    if (typeof this.onUpdateWordState === 'function') {
-      this.onUpdateWordState(this.getCurrentWordState())
-    }
-  }
-
-  // start the timer/engine
-  start() {
-    if (this.started) return
-    this.started = true
-    this.startedAt = Date.now()
-    this.endedAt = null
-    this._startHistoryInterval()
-    if (typeof this.onStart === 'function') this.onStart()
-  }
-
-  // internal tick to be called by UI timer or via setInterval in engine
-  // delta is seconds elapsed (default 1)
-  tick(delta = 1) {
-    if (!this.started || this.finished) return
-    const now = Date.now()
-    const elapsedSinceLast = (now - this.lastTickAt) / 1000
-    this.lastTickAt = now
-    this.timeLeft = Math.max(0, this.timeLimit - Math.floor((now - this.startedAt) / 1000))
-    if (typeof this.onTick === 'function') {
-      const payload = {
-        timeLeft: this.timeLeft,
-        elapsed: Math.floor((now - this.startedAt) / 1000),
-        wpm: this.getWPM()
-      }
-      this.onTick(payload)
-    }
-    // add snapshot to history
-    this._addHistoryPoint(this.getWPM())
-    if (this.timeLeft <= 0) this.finish()
-  }
-
-  // finish test
-  finish() {
-    if (this.finished) return
-    this.finished = true
-    this.endedAt = Date.now()
-    this.started = false
-    clearInterval(this._historyInterval)
-    // finalize current word (if partially typed, still count typed chars)
-    if (this.currentInput.length > 0) {
-      // we don't award correct chars unless the word is completed with a space
-      this.wordHistory.push({
-        word: this.words[this.currentWordIndex],
-        typed: this.currentInput,
-        correct: 0,
-        timeTaken: 0
-      })
-      // typed chars counted already
-    }
-
-    // compute final derived metrics
-    const stats = {
-      wpm: this.getWPM(),
-      accuracy: this.getAccuracy(),
-      raw: this.getRawSpeed()
-    }
-
-    // if best, persist
-    if (stats.wpm > this.best.wpm) {
-      this.best.wpm = stats.wpm
-      this.best.accuracy = stats.accuracy
-      this.best.raw = stats.raw
-      this._saveBest()
-    }
-
-    if (typeof this.onFinish === 'function') this.onFinish(stats)
-  }
-
-  // add a history datapoint (capped)
-  _addHistoryPoint(wpm) {
-    this.wpmHistory.push(Math.round(wpm))
-    if (this.wpmHistory.length > 120) this.wpmHistory.shift()
-  }
-
-  _startHistoryInterval() {
-    if (this._historyInterval) clearInterval(this._historyInterval)
-    this._historyInterval = setInterval(() => {
-      this._addHistoryPoint(this.getWPM())
-    }, this.tickIntervalMs)
-  }
-
-  // public: returns the current target word
-  getCurrentWord() {
-    return this.words[this.currentWordIndex] || ''
-  }
-
-  // create rich state for current word to help UI highlight chars
-  getCurrentWordState() {
-    const target = this.getCurrentWord()
-    const typed = this.currentInput
-    const chars = []
-    let correctCount = 0
-    for (let i = 0; i < Math.max(target.length, typed.length); i++) {
-      const t = target[i] || ''
-      const u = typed[i] || ''
-      const ok = u && u === t
-      if (ok) correctCount++
-      chars.push({ target: t, typed: u, correct: ok })
-    }
-    return {
-      word: target,
-      typed,
-      chars,
-      isComplete: typed === target,
-      correctCount
-    }
-  }
-
-  // process an entire input value (useful for input change events)
-  processInput(value) {
-    if (this.finished) return
-    // start on first user input
-    if (!this.started) this.start()
-    // if the user typed a space at the end, finalize the word
-    if (value.endsWith(' ')) {
-      const typed = value.trim()
-      const target = this.getCurrentWord()
-      // count typed chars, include the space as a char if configured
-      const typedIncrement = typed.length + (this.spaceCountsAsChar ? 1 : 0)
-      this.typedChars += typedIncrement
-      // check correctness
-      if (typed === target) {
-        this.correctChars += target.length + (this.spaceCountsAsChar ? 1 : 0)
-        // store perfect word
-        this.wordHistory.push({ word: target, typed, correct: target.length, perfect: true, timeTaken: 0 })
-      } else {
-        // partial correctness per char
-        let correct = 0
-        for (let i = 0; i < Math.min(typed.length, target.length); i++) {
-          if (typed[i] === target[i]) correct++
+        if (wordStateOrList && typeof wordStateOrList.word === 'string' && Array.isArray(wordStateOrList.chars)) {
+          // render a contextual window using global Typing.words if available for context
+          const idx = wordStateOrList.index || 0
+          const words = (window.Typing && Typing.words) ? Typing.words : [wordStateOrList.word]
+          const start = Math.max(0, idx - 6)
+          const end = Math.min(words.length, start + 40)
+          elWS.innerHTML = ''
+          for (let i = start; i < end; i++) {
+            const token = words[i]
+            const span = document.createElement('span')
+            span.className = 'word'
+            span.style.marginRight = '0.6rem'
+            if (i === idx) {
+              // highlight current word per-character
+              const typed = (i === idx) ? wordStateOrList.typed : ''
+              for (let c = 0; c < Math.max(token.length, typed.length); c++) {
+                const chSpan = document.createElement('span')
+                chSpan.textContent = token[c] || ''
+                chSpan.style.padding = '0 1px'
+                chSpan.style.borderRadius = '3px'
+                if (!typed[c]) {
+                  chSpan.style.opacity = 0.75
+                } else if (typed[c] === token[c]) {
+                  chSpan.style.background = '#37e67d'
+                  chSpan.style.color = '#042414'
+                } else {
+                  chSpan.style.background = '#7a1b1b'
+                  chSpan.style.color = '#fff'
+                }
+                span.appendChild(chSpan)
+              }
+              // overflow typed characters
+              if (typed.length > token.length) {
+                const over = document.createElement('span')
+                over.textContent = typed.slice(token.length)
+                over.style.background = '#7a1b1b'
+                over.style.color = '#fff'
+                over.style.marginLeft = '6px'
+                span.appendChild(over)
+              }
+            } else {
+              span.textContent = token
+              span.style.opacity = i < idx ? 0.5 : 0.9
+            }
+            elWS.appendChild(span)
+          }
+          return
         }
-        this.correctChars += correct
-        this.wordHistory.push({ word: target, typed, correct, perfect: false, timeTaken: 0 })
+
+        // otherwise if an array of words passed
+        if (Array.isArray(wordStateOrList)) {
+          elWS.innerHTML = ''
+          wordStateOrList.slice(0, 60).forEach(w => {
+            const s = document.createElement('span')
+            s.className = 'word'
+            s.style.marginRight = '0.6rem'
+            s.textContent = w
+            elWS.appendChild(s)
+          })
+          return
+        }
+
+        // fallback: try to render Typing.words
+        if (window.Typing && Array.isArray(Typing.words)) {
+          elWS.innerHTML = ''
+          Typing.words.slice(Typing.currentWordIndex, Typing.currentWordIndex + 40).forEach(w => {
+            const s = document.createElement('span')
+            s.className = 'word'
+            s.style.marginRight = '0.6rem'
+            s.textContent = w
+            elWS.appendChild(s)
+          })
+        }
+      } catch (e) {
+        console.warn('[UI] renderWordStream failed', e)
       }
-      // move to next word
-      this.currentWordIndex++
-      this.currentInput = ''
-      // update UI
-      if (typeof this.onUpdateWordState === 'function') this.onUpdateWordState(this.getCurrentWordState())
-      return
-    }
+    },
 
-    // otherwise update currentInput and typedChars but do not finalize
-    // For an input change, we don't want to double-count backspaces; so we track typedChars as 'keystroke approximate'
-    // For simplicity, we set typedChars as previous count + delta typed since last input
-    // A more advanced approach would count physical keystrokes; this is sufficient for standard use.
-    const delta = value.length - this.currentInput.length
-    if (delta > 0) this.typedChars += delta
-    // handle removal (backspace) - don't decrement typedChars (common approach)
-    this.currentInput = value
-    if (typeof this.onUpdateWordState === 'function') this.onUpdateWordState(this.getCurrentWordState())
-  }
+    // show a small toast at bottom-right
+    showSavedToast(msg = 'Saved') {
+      // create toast container if needed
+      let t = document.getElementById('sebtype-toast')
+      if (!t) {
+        t = document.createElement('div')
+        t.id = 'sebtype-toast'
+        t.style.position = 'fixed'
+        t.style.right = '20px'
+        t.style.bottom = '20px'
+        t.style.background = 'rgba(11,38,24,0.95)'
+        t.style.color = 'var(--text)'
+        t.style.padding = '8px 12px'
+        t.style.borderRadius = '8px'
+        t.style.border = '1px solid rgba(55,230,125,0.12)'
+        t.style.zIndex = 9999
+        document.body.appendChild(t)
+      }
+      t.textContent = msg
+      t.style.opacity = '1'
+      if (this._toastTimer) clearTimeout(this._toastTimer)
+      this._toastTimer = setTimeout(() => { t.style.opacity = '0'; try{ t.remove() }catch(e){} }, 2500)
+    },
 
-  // helper: process a single keystroke character (useful if you capture raw key events)
-  processKeystroke(ch) {
-    if (this.finished) return
-    if (!this.started) this.start()
-    if (ch === 'Backspace') {
-      this.currentInput = this.currentInput.slice(0, -1)
-      if (typeof this.onUpdateWordState === 'function') this.onUpdateWordState(this.getCurrentWordState())
-      return
-    }
-    // add char
-    this.currentInput += ch
-    this.typedChars++
-    // if space, treat as word completion
-    if (ch === ' ') {
-      this.processInput(this.currentInput) // this will trim and finalize
-    } else {
-      if (typeof this.onUpdateWordState === 'function') this.onUpdateWordState(this.getCurrentWordState())
-    }
-  }
+    // called when new run recorded (Data.recordRun calls UI.onNewRun if present)
+    onNewRun(rec) {
+      // mild animation in footer
+      try {
+        if (this.elements.footer) {
+          const old = this.elements.footer.style.transform
+          this.elements.footer.style.transform = 'translateY(-4px)'
+          setTimeout(()=>{ this.elements.footer.style.transform = old }, 200)
+        }
+      } catch (e) {}
+    },
 
-  // derived metrics
-  getElapsedSeconds() {
-    if (!this.startedAt) return 0
-    if (this.endedAt) return Math.floor((this.endedAt - this.startedAt) / 1000)
-    return Math.floor((Date.now() - this.startedAt) / 1000)
-  }
-
-  getWPM() {
-    const elapsed = this.getElapsedSeconds()
-    if (elapsed <= 0) return 0
-    // standard: WPM = (correct_chars / 5) / (elapsed_minutes)
-    const minutes = elapsed / 60
-    return Math.round((this.correctChars / 5) / minutes) || 0
-  }
-
-  getRawSpeed() {
-    const elapsed = this.getElapsedSeconds()
-    if (elapsed <= 0) return 0
-    const minutes = elapsed / 60
-    return Math.round((this.typedChars / 5) / minutes) || 0
-  }
-
-  getAccuracy() {
-    if (this.typedChars === 0) return 100
-    return Math.round((this.correctChars / this.typedChars) * 100) || 0
-  }
-
-  // consistency: measure variance of per-second WPM in history
-  getConsistency() {
-    if (!this.wpmHistory.length) return 0
-    return Math.round(stddev(this.wpmHistory))
-  }
-
-  // allow dynamic mode change (regenerates words)
-  setMode(mode) {
-    this.mode = mode
-    this.resetTest()
-  }
-
-  setTimeLimit(sec) {
-    this.timeLimit = sec
-    this.timeLeft = sec
-    this.resetTest()
-  }
-
-  // expose a compact export of current stats for UI
-  getStatsSnapshot() {
-    return {
-      wpm: this.getWPM(),
-      raw: this.getRawSpeed(),
-      accuracy: this.getAccuracy(),
-      consistency: this.getConsistency(),
-      typedChars: this.typedChars,
-      correctChars: this.correctChars,
-      timeLeft: this.timeLeft,
-      elapsed: this.getElapsedSeconds(),
-      best: this.best
+    // optional: called by Modes when mode changes
+    onModeChange(mode) {
+      if (this.elements.modeDisplay) this.elements.modeDisplay.textContent = mode
+      this.showSavedToast(`Mode: ${mode}`)
     }
   }
-}
 
+  // expose globally
+  global.UI = UI
+  // auto-init when DOM ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => UI.init())
+  } else {
+    setTimeout(()=>UI.init(), 0)
+  }
+
+})(window)
