@@ -1,1 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SebType - The Green Typing Experience</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="favicon.ico" />
+</head>
+<body>
+  <div id="app">
+    <nav id="navbar">
+      <div id="logo">SebType</div>
+      <div id="nav-controls">
+        <button class="nav-btn" id="btn-modes">Modes</button>
+        <button class="nav-btn" id="btn-stats">Stats</button>
+        <button class="nav-btn" id="btn-settings">Settings</button>
+      </div>
+    </nav>
+
+    <main id="main">
+      <div id="word-box">
+        <div id="word-stream"></div>
+        <input id="hidden-input" type="text" autocomplete="off" spellcheck="false" autofocus />
+      </div>
+
+      <div id="hud">
+        <div id="timer-display">60s</div>
+        <div id="mode-display">english</div>
+        <div id="accuracy-display">Acc: --%</div>
+      </div>
+    </main>
+
+    <section id="results" class="hidden">
+      <div class="result-box">
+        <h2>Results</h2>
+        <div class="stats">
+          <div><strong>WPM:</strong> <span id="stat-wpm">0</span></div>
+          <div><strong>Raw:</strong> <span id="stat-raw">0</span></div>
+          <div><strong>Accuracy:</strong> <span id="stat-acc">0%</span></div>
+          <div><strong>Time:</strong> <span id="stat-time">--</span></div>
+        </div>
+        <canvas id="graph"></canvas>
+        <button id="restart-btn">Restart</button>
+      </div>
+    </section>
+
+    <footer>
+      <p>© 2025 SebType • Made by trabyRBLX</p>
+      <p>Like Monkeytype but greener 🌿</p>
+    </footer>
+  </div>
+
+  <!-- Scripts -->
+  <script src="scripts/modes.js"></script>
+  <script src="scripts/settings.js"></script>
+  <script src="scripts/timer.js"></script>
+  <script src="scripts/typing.js"></script>
+  <script src="scripts/graph.js"></script>
+  <script src="scripts/ui.js"></script>
+  <script src="scripts/data.js"></script>
+  <script src="scripts/sounds.js"></script>
+  <script src="scripts/main.js"></script>
+</body>
+</html>
 
