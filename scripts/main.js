@@ -1,383 +1,621 @@
 // scripts/main.js
-// Main UI glue for SebType website
-// - Imports TypingEngine from typing.js
-// - Wires DOM elements: controls, word display, input capture, stats panels, result overlay
-// - Starts/Stops Timer and drives engine.tick() every second
-// - Renders the per-character highlighting and a simple SVG WPM graph
+// Main wiring for SebType website — robust and defensive.
+// Reconnects UI -> Typing/Timer/Graph/Modes/Settings/Data/Sounds
+// Ensures nav buttons (Modes, Stats, Settings) work, restart behaves, focus input,
+// and final result handling records runs and shows the graph.
 //
-// Requirements: include this as a module in index.html:
-// <script type="module" src="scripts/main.js"></script>
+// This file is defensive: it checks for existence of each module and provides
+// fallbacks so UI buttons won't fail if a module is missing.
 
-import { TypingEngine } from './typing.js'
+(function () {
+  'use strict';
 
-// convenience for query selector
-const $ = (sel, parent = document) => parent.querySelector(sel)
-const $$ = (sel, parent = document) => Array.from(parent.querySelectorAll(sel))
+  // helper selectors
+  const $ = (sel, parent = document) => parent.querySelector(sel);
+  const $$ = (sel, parent = document) => Array.from((parent || document).querySelectorAll(sel));
 
-// default config
-const DEFAULT_TIME = 60
-const DEFAULT_MODE = 'english'
-
-/**
- * UI Elements expected in index.html:
- * - #word-stream  (container for words)
- * - #hidden-input (real input element - can be invisible but focused)
- * - #wpm-value, #accuracy-value, #raw-value, #time-value
- * - #btn-restart, #select-time, #select-mode
- * - #results-overlay, #results-wpm, #results-accuracy, #results-graph
- */
-
-function createBasicUIIfMissing() {
-  // If user hasn't made the HTML yet, create minimal DOM scaffolding so scripts work.
-  if (!document.body) return
-  if (!$('#sebtype-root')) {
-    const root = document.createElement('div')
-    root.id = 'sebtype-root'
-    root.innerHTML = `
-      <style>
-        /* Basic inline fallback styles so UI isn't broken if style.css is missing */
-        :root {
-          --bg: #061f12; --panel: #0b3d23; --accent: #37e67d; --muted: #8de1b0; --error: #e15858;
-        }
-        body { background: var(--bg); color: #eafaf0; font-family: 'Roboto Mono', monospace; margin:0; }
-        .container { max-width:1100px; margin:32px auto; padding:20px; }
-        .panel { background: var(--panel); padding:20px; border-radius:12px; }
-        .controls { display:flex; gap:8px; margin-bottom:12px; align-items:center; }
-        .word-stream { padding:18px; background:#042414; border-radius:10px; min-height:88px; }
-        input[type=text] { background:transparent; border:1px solid #073a2a; color:inherit; padding:10px; border-radius:6px; }
-      </style>
-      <div class="container">
-        <div class="panel" style="display:flex; justify-content:space-between; align-items:center;">
-          <div style="display:flex; gap:12px; align-items:center;">
-            <div style="width:40px;height:40px;border-radius:8px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#042414;font-weight:700">S</div>
-            <div style="font-size:18px;font-weight:700">SebType</div>
-          </div>
-          <div style="display:flex; gap:8px; align-items:center;">
-            <select id="select-mode">
-              <option value="english">English</option>
-              <option value="numbers">Numbers</option>
-              <option value="quotes">Quotes</option>
-            </select>
-            <select id="select-time">
-              <option value="15">15s</option>
-              <option value="30">30s</option>
-              <option value="60">60s</option>
-              <option value="120">120s</option>
-            </select>
-            <button id="btn-restart">New</button>
-          </div>
-        </div>
-
-        <div class="panel" style="margin-top:16px;">
-          <div id="word-stream" class="word-stream"></div>
-          <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
-            <input id="hidden-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
-            <div style="margin-left:auto; display:flex; gap:8px;">
-              <div style="text-align:center;"><div id="wpm-value" style="font-size:20px">0</div><div style="font-size:11px">WPM</div></div>
-              <div style="text-align:center;"><div id="accuracy-value" style="font-size:20px">100%</div><div style="font-size:11px">Accuracy</div></div>
-              <div style="text-align:center;"><div id="raw-value" style="font-size:20px">0</div><div style="font-size:11px">Raw</div></div>
-              <div style="text-align:center;"><div id="time-value" style="font-size:20px">60s</div><div style="font-size:11px">Time</div></div>
-            </div>
-          </div>
-        </div>
-
-        <div id="results-overlay" class="panel" style="margin-top:16px; display:none;">
-          <div style="font-weight:700; font-size:20px">Results</div>
-          <div style="display:flex; gap:12px; margin-top:8px;">
-            <div><div id="results-wpm" style="font-size:24px">0</div><div style="font-size:12px">WPM</div></div>
-            <div><div id="results-accuracy" style="font-size:24px">100%</div><div style="font-size:12px">Accuracy</div></div>
-            <div style="flex:1;"><svg id="results-graph" width="100%" height="64"></svg></div>
-          </div>
-        </div>
-
-      </div>
-    `
-    document.body.prepend(root)
+  // DOM elements expected (fallbacks will be created if missing)
+  const el = {
+    btnModes: $('#btn-modes'),
+    btnStats: $('#btn-stats'),
+    btnSettings: $('#btn-settings'),
+    navControls: $('#nav-controls'),
+    wordStream: $('#word-stream') || $('#word-area'),
+    hiddenInput: $('#hidden-input') || $('#input-box'),
+    timerDisplay: $('#timer-display'),
+    modeDisplay: $('#mode-display'),
+    accuracyDisplay: $('#accuracy-display'),
+    resultsSection: $('#results'),
+    resultsWpm: $('#stat-wpm'),
+    resultsRaw: $('#stat-raw'),
+    resultsAcc: $('#stat-acc'),
+    resultsTime: $('#stat-time'),
+    graphCanvas: $('#graph'),
+    restartBtn: $('#restart-btn') || $('#restart-btn'),
+    footer: document.querySelector('footer')
   }
-}
 
-createBasicUIIfMissing()
+  // Defensive existence checks for external modules
+  const has = {
+    Modes: typeof window.Modes !== 'undefined',
+    Settings: typeof window.Settings !== 'undefined',
+    Timer: typeof window.Timer !== 'undefined',
+    Typing: typeof window.Typing !== 'undefined',
+    Graph: typeof window.Graph !== 'undefined',
+    Data: typeof window.Data !== 'undefined',
+    Sounds: typeof window.Sounds !== 'undefined',
+    UI: typeof window.UI !== 'undefined'
+  }
 
-// find DOM elements (either user provided or created above)
-const el = {
-  wordStream: $('#word-stream'),
-  hiddenInput: $('#hidden-input'),
-  wpmValue: $('#wpm-value'),
-  accuracyValue: $('#accuracy-value'),
-  rawValue: $('#raw-value'),
-  timeValue: $('#time-value'),
-  btnRestart: $('#btn-restart'),
-  selectTime: $('#select-time'),
-  selectMode: $('#select-mode'),
-  resultsOverlay: $('#results-overlay'),
-  resultsWpm: $('#results-wpm'),
-  resultsAccuracy: $('#results-accuracy'),
-  resultsGraph: $('#results-graph')
-}
+  // Ensure minimal UI exists so we can attach listeners
+  function ensureBaseUI() {
+    // If word stream or input missing create them inside #app if present
+    const app = $('#app') || document.body;
+    if (!el.wordStream) {
+      const wb = document.createElement('div');
+      wb.id = 'word-stream';
+      wb.style.minHeight = '88px';
+      wb.style.padding = '12px';
+      app.querySelector('#main')?.prepend(wb);
+      el.wordStream = wb;
+    }
+    if (!el.hiddenInput) {
+      const inp = document.createElement('input');
+      inp.id = 'hidden-input';
+      inp.setAttribute('autocomplete', 'off');
+      inp.setAttribute('spellcheck', 'false');
+      inp.style.opacity = '0';
+      inp.style.position = 'absolute';
+      inp.style.left = '-9999px';
+      app.appendChild(inp);
+      el.hiddenInput = inp;
+    }
+    if (!el.timerDisplay) {
+      const t = document.createElement('div');
+      t.id = 'timer-display';
+      t.textContent = '60s';
+      app.querySelector('#main')?.appendChild(t);
+      el.timerDisplay = t;
+    }
+    if (!el.modeDisplay) {
+      const m = document.createElement('div');
+      m.id = 'mode-display';
+      m.textContent = has.Modes ? Modes.getMode() : 'english';
+      app.querySelector('#main')?.appendChild(m);
+      el.modeDisplay = m;
+    }
+    if (!el.accuracyDisplay) {
+      const a = document.createElement('div');
+      a.id = 'accuracy-display';
+      a.textContent = 'Acc: --%';
+      app.querySelector('#main')?.appendChild(a);
+      el.accuracyDisplay = a;
+    }
+    if (!el.resultsSection) {
+      // create a simple results panel
+      const sec = document.createElement('section');
+      sec.id = 'results';
+      sec.className = 'hidden';
+      sec.innerHTML = `
+        <div class="result-box">
+          <h2>Results</h2>
+          <div class="stats">
+            <div><strong>WPM:</strong> <span id="stat-wpm">0</span></div>
+            <div><strong>Raw:</strong> <span id="stat-raw">0</span></div>
+            <div><strong>Accuracy:</strong> <span id="stat-acc">0%</span></div>
+            <div><strong>Time:</strong> <span id="stat-time">--</span></div>
+          </div>
+          <canvas id="graph"></canvas>
+          <button id="restart-btn">Restart</button>
+        </div>`;
+      document.body.appendChild(sec);
+      el.resultsSection = sec;
+      el.resultsWpm = $('#stat-wpm');
+      el.resultsRaw = $('#stat-raw');
+      el.resultsAcc = $('#stat-acc');
+      el.resultsTime = $('#stat-time');
+      el.graphCanvas = $('#graph');
+      el.restartBtn = $('#restart-btn');
+    }
+  }
 
-// initialize engine
-const engine = new TypingEngine({
-  timeLimit: DEFAULT_TIME,
-  mode: DEFAULT_MODE,
-  seedSize: 300
-})
-
-// wire engine events
-engine.onStart = () => {
-  // start UI timer loop
-  startUITimer()
-}
-engine.onTick = ({ timeLeft, elapsed, wpm }) => {
-  renderStats()
-  el.timeValue.textContent = `${timeLeft}s`
-}
-engine.onUpdateWordState = (wordState) => {
-  renderWordStream(wordState)
-}
-engine.onFinish = (stats) => {
-  renderStats()
-  showResults(stats)
-  stopUITimer()
-}
-
-// UI timer that drives engine.tick() every second
-let uiTimer = null
-function startUITimer() {
-  if (uiTimer) return
-  uiTimer = setInterval(() => {
-    engine.tick(1)
-  }, 1000)
-}
-function stopUITimer() {
-  if (!uiTimer) return
-  clearInterval(uiTimer)
-  uiTimer = null
-}
-
-// constructs DOM for the immediate visible words and highlights the current word characters
-function renderWordStream(currentState) {
-  // We'll display a window of words around the current index
-  const windowSize = 40
-  const start = Math.max(0, engine.currentWordIndex - 5)
-  const end = Math.min(engine.words.length, start + windowSize)
-  // build fragment
-  el.wordStream.innerHTML = ''
-  for (let i = start; i < end; i++) {
-    const word = engine.words[i]
-    const span = document.createElement('span')
-    span.className = 'word-token'
-    span.style.display = 'inline-block'
-    span.style.marginRight = '12px'
-    // highlight current word with per-character spans
-    if (i === engine.currentWordIndex) {
-      const chars = []
-      const typed = currentState ? currentState.typed : ''
-      for (let c = 0; c < Math.max(word.length, typed.length); c++) {
-        const ch = document.createElement('span')
-        ch.textContent = word[c] || ''
-        ch.style.padding = '0 1px'
-        ch.style.borderRadius = '2px'
-        // determine typed char and correctness
-        const typedChar = typed[c] || ''
-        if (typedChar === '') {
-          ch.style.opacity = 0.7
-        } else if (typedChar === (word[c] || '')) {
-          ch.style.color = '#042414'
-          ch.style.background = '#37e67d'
-        } else {
-          ch.style.color = '#fff'
-          ch.style.background = '#7a1b1b'
-        }
-        chars.push(ch)
+  // safe calls to external modules with logging
+  function safeCall(modName, fnName, ...args) {
+    if (has[modName] && window[modName] && typeof window[modName][fnName] === 'function') {
+      try {
+        return window[modName][fnName](...args);
+      } catch (e) {
+        console.warn(`[main] ${modName}.${fnName} threw`, e);
       }
-      // append char spans
-      for (const c of chars) span.appendChild(c)
-      // if the current typed input is longer than the target, show extra red text
-      if (currentState && currentState.typed.length > word.length) {
-        const overflow = document.createElement('span')
-        overflow.textContent = currentState.typed.slice(word.length)
-        overflow.style.color = '#fff'
-        overflow.style.background = '#7a1b1b'
-        overflow.style.marginLeft = '6px'
-        span.appendChild(overflow)
+    }
+    return undefined;
+  }
+
+  // show/hide helpers
+  function showResultsPanel() {
+    if (!el.resultsSection) return;
+    el.resultsSection.classList.remove('hidden');
+  }
+  function hideResultsPanel() {
+    if (!el.resultsSection) return;
+    el.resultsSection.classList.add('hidden');
+  }
+
+  // Render helpers
+  function updateHud(stats = {}) {
+    if (el.timerDisplay) {
+      const t = stats.timeLeft != null ? `${stats.timeLeft}s` : (has.Timer ? `${Timer.getProgress ? Math.round(Timer.getProgress()*100) : ''}` : '60s');
+      el.timerDisplay.textContent = t;
+    }
+    if (el.modeDisplay) {
+      el.modeDisplay.textContent = (has.Modes ? Modes.getMode() : 'english');
+    }
+    if (el.accuracyDisplay) {
+      el.accuracyDisplay.textContent = stats.accuracy != null ? `Acc: ${stats.accuracy}%` : 'Acc: --%';
+    }
+  }
+
+  function renderResults(stats = {}) {
+    if (el.resultsWpm) el.resultsWpm.textContent = stats.wpm != null ? stats.wpm : '0';
+    if (el.resultsRaw) el.resultsRaw.textContent = stats.raw != null ? stats.raw : '0';
+    if (el.resultsAcc) el.resultsAcc.textContent = stats.accuracy != null ? `${stats.accuracy}%` : '0%';
+    if (el.resultsTime) el.resultsTime.textContent = stats.elapsed != null ? `${stats.elapsed}s` : '--';
+    // draw graph if Graph available
+    if (has.Graph && window.Graph && Array.isArray(stats.history)) {
+      try {
+        Graph.render(stats.history);
+      } catch (e) {
+        console.warn('[main] Graph.render failed', e);
+      }
+    } else if (el.graphCanvas) {
+      // fallback: draw simple bar-ish visualization on canvas
+      try {
+        const c = el.graphCanvas;
+        const ctx = c.getContext && c.getContext('2d');
+        if (ctx) {
+          const w = c.width = c.clientWidth || 400;
+          const h = c.height = c.clientHeight || 120;
+          ctx.clearRect(0,0,w,h);
+          const arr = stats.history || [];
+          const max = Math.max(10, ...(arr.length ? arr : [10]));
+          const step = Math.max(1, Math.floor(w / Math.max(1, arr.length)));
+          ctx.fillStyle = '#37e67d33';
+          for (let i=0;i<arr.length;i++){
+            const val = arr[i];
+            const barH = Math.round((val / max) * h);
+            ctx.fillRect(i*step, h-barH, Math.max(1, step-1), barH);
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  // Focus helper that avoids scrolling
+  function focusInputSilently() {
+    try {
+      const input = el.hiddenInput;
+      if (!input) return;
+      const x = window.scrollX || 0;
+      const y = window.scrollY || 0;
+      input.focus({ preventScroll: true });
+      window.scrollTo(x, y);
+    } catch (e) {
+      try { el.hiddenInput.focus(); } catch (_) {}
+    }
+  }
+
+  // Wire mode panel: show small popup to pick Modes.availableModes()
+  function openModesPanel() {
+    // create overlay if not exists
+    let pnl = $('#modes-panel');
+    if (!pnl) {
+      pnl = document.createElement('div');
+      pnl.id = 'modes-panel';
+      pnl.className = 'modal-panel';
+      pnl.style.position = 'fixed';
+      pnl.style.right = '20px';
+      pnl.style.top = '72px';
+      pnl.style.background = 'rgba(11,38,24,0.98)';
+      pnl.style.border = '1px solid rgba(55, 230, 125, 0.12)';
+      pnl.style.padding = '12px';
+      pnl.style.borderRadius = '10px';
+      pnl.style.zIndex = 120;
+      document.body.appendChild(pnl);
+    }
+    pnl.innerHTML = '<div style="font-weight:700;margin-bottom:8px;color:var(--accent)">Modes</div>';
+    const modes = has.Modes ? Modes.availableModes() : [{ id:'english', name:'English', desc:'Default' }];
+    modes.forEach(m => {
+      const b = document.createElement('button');
+      b.textContent = m.name;
+      b.style.display = 'block';
+      b.style.width = '100%';
+      b.style.margin = '6px 0';
+      b.style.padding = '8px';
+      b.style.borderRadius = '6px';
+      b.style.background = 'transparent';
+      b.style.color = 'var(--text)';
+      b.onclick = () => {
+        if (has.Modes) {
+          try { Modes.setMode(m.id); } catch (e) {}
+        }
+        if (el.modeDisplay) el.modeDisplay.textContent = m.id;
+        focusInputSilently();
+        // close panel
+        pnl.remove();
+      };
+      pnl.appendChild(b);
+    });
+  }
+
+  // Wire settings panel (if Settings exists, use it; otherwise show fallback)
+  function openSettingsPanel() {
+    let pnl = $('#settings-panel');
+    if (!pnl) {
+      pnl = document.createElement('div');
+      pnl.id = 'settings-panel';
+      pnl.className = 'modal-panel';
+      pnl.style.position = 'fixed';
+      pnl.style.left = '50%';
+      pnl.style.top = '12%';
+      pnl.style.transform = 'translateX(-50%)';
+      pnl.style.background = 'var(--panel-bg)';
+      pnl.style.border = '1px solid var(--border)';
+      pnl.style.padding = '16px';
+      pnl.style.borderRadius = '12px';
+      pnl.style.zIndex = 120;
+      pnl.style.minWidth = '320px';
+      document.body.appendChild(pnl);
+    }
+    // populate content
+    pnl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-weight:700;color:var(--accent)">Settings</div>
+        <button id="close-settings" style="background:transparent;border:none;color:var(--text)">✕</button>
+      </div>
+      <div style="margin-top:10px;">
+        <label style="display:block;margin-bottom:8px">Theme:
+          <select id="settings-theme" style="margin-left:10px">
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+          </select>
+        </label>
+        <label style="display:block;margin-bottom:8px">Sound:
+          <input id="settings-sound" type="checkbox" style="margin-left:10px" />
+        </label>
+        <label style="display:block;margin-bottom:8px">Show WPM Graph:
+          <input id="settings-graph" type="checkbox" style="margin-left:10px" checked />
+        </label>
+        <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+          <button id="save-settings" style="background:var(--accent);border-radius:8px;padding:6px 10px;border:none">Save</button>
+          <button id="cancel-settings" style="background:transparent;border:1px solid var(--border);border-radius:8px;padding:6px 10px">Cancel</button>
+        </div>
+      </div>
+    `;
+
+    // wire buttons
+    $('#close-settings').addEventListener('click', () => pnl.remove());
+    $('#cancel-settings').addEventListener('click', () => pnl.remove());
+    // populate initial values from Settings if available
+    if (has.Settings) {
+      try {
+        const theme = Settings.get('theme', 'dark');
+        const sound = Settings.get('sound', false);
+        const graph = Settings.get('showWPMGraph', true);
+        $('#settings-theme').value = theme;
+        $('#settings-sound').checked = !!sound;
+        $('#settings-graph').checked = !!graph;
+      } catch (e) {}
+    }
+    // Save
+    $('#save-settings').addEventListener('click', () => {
+      const theme = $('#settings-theme').value;
+      const sound = $('#settings-sound').checked;
+      const graph = $('#settings-graph').checked;
+      if (has.Settings) {
+        try {
+          Settings.set('theme', theme);
+          Settings.set('sound', sound);
+          Settings.set('showWPMGraph', graph);
+        } catch (e) {}
+      } else {
+        // minimal application: toggle document theme class
+        document.documentElement.classList.toggle('theme-light', theme === 'light');
+        document.documentElement.classList.toggle('theme-dark', theme !== 'light');
+        // persist
+        try { localStorage.setItem('sebtype:settings:v1', JSON.stringify({ theme, sound, showWPMGraph: graph })) } catch (e) {}
+      }
+      // configure Sounds if present
+      if (has.Sounds) {
+        try { Sounds.setEnabled(!!sound); } catch (e) {}
+      }
+      pnl.remove();
+    });
+  }
+
+  // Stats panel (shows Data.getRecent)
+  function openStatsPanel() {
+    const pnlId = 'stats-panel';
+    let pnl = document.getElementById(pnlId);
+    if (!pnl) {
+      pnl = document.createElement('div');
+      pnl.id = pnlId;
+      pnl.style.position = 'fixed';
+      pnl.style.left = '50%';
+      pnl.style.top = '10%';
+      pnl.style.transform = 'translateX(-50%)';
+      pnl.style.background = 'var(--panel-bg)';
+      pnl.style.padding = '12px';
+      pnl.style.border = '1px solid var(--border)';
+      pnl.style.borderRadius = '10px';
+      pnl.style.zIndex = 120;
+      pnl.style.maxHeight = '70vh';
+      pnl.style.overflow = 'auto';
+      document.body.appendChild(pnl);
+    }
+    pnl.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center">
+      <div style="font-weight:700;color:var(--accent)">Recent Runs</div>
+      <button id="close-stats" style="background:transparent;border:none;color:var(--text)">✕</button>
+    </div>`;
+    $('#close-stats').addEventListener('click', () => pnl.remove());
+
+    // If Data exists show recent runs; otherwise show a help message
+    if (has.Data) {
+      const recent = Data.getRecent(50);
+      if (recent.length === 0) {
+        pnl.innerHTML += '<div style="margin-top:10px;color:var(--sub)">No runs recorded yet — do a test first.</div>';
+      } else {
+        const table = document.createElement('table');
+        table.style.width = '100%';
+        table.style.marginTop = '8px';
+        table.innerHTML = `
+          <thead style="text-align:left;color:var(--sub)"><tr><th>WPM</th><th>Acc</th><th>Raw</th><th>Mode</th><th>Date</th></tr></thead>
+          <tbody></tbody>
+        `;
+        const tbody = table.querySelector('tbody');
+        recent.forEach(r => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td style="padding:6px">${r.wpm}</td><td>${r.accuracy}%</td><td>${r.raw}</td><td>${r.mode}</td><td>${new Date(r.date).toLocaleString()}</td>`;
+          tbody.appendChild(tr);
+        });
+        pnl.appendChild(table);
       }
     } else {
-      // non-current words are displayed normally
-      span.textContent = word
-      span.style.opacity = i < engine.currentWordIndex ? 0.5 : 0.9
+      pnl.innerHTML += '<div style="margin-top:10px;color:var(--sub)">No data module loaded. Runs are not being saved.</div>';
     }
-    el.wordStream.appendChild(span)
   }
-  // ensure the input is always focused
-  focusInputSilently()
-}
 
-// render stats numbers
-function renderStats() {
-  const s = engine.getStatsSnapshot()
-  el.wpmValue.textContent = s.wpm
-  el.accuracyValue.textContent = `${s.accuracy}%`
-  el.rawValue.textContent = s.raw
-}
+  // Handle result from Typing finish (safe hooking)
+  function onTestFinish(stats) {
+    // stats expected to contain: wpm, accuracy, raw, elapsed, history (optional)
+    // render results and show overlay
+    renderResults(stats || {});
+    showResultsPanel();
 
-// show results overlay and draw a small graph from engine.wpmHistory
-function showResults(stats) {
-  // show overlay stats
-  if (el.resultsWpm) el.resultsWpm.textContent = stats.wpm
-  if (el.resultsAccuracy) el.resultsAccuracy.textContent = `${stats.accuracy}%`
-  if (el.resultsGraph) {
-    drawSmallGraph(el.resultsGraph, engine.wpmHistory)
-  }
-  if (el.resultsOverlay) el.resultsOverlay.style.display = 'block'
-}
-
-// small SVG line graph renderer
-function drawSmallGraph(svgEl, points) {
-  if (!svgEl) return
-  const width = svgEl.clientWidth || 400
-  const height = svgEl.clientHeight || 64
-  // prepare points scaled
-  const max = Math.max(10, ...points)
-  const len = Math.max(1, points.length)
-  const step = width / len
-  // build polyline points
-  const coords = points.map((p, i) => {
-    const x = i * step
-    const y = height - (p / max) * (height - 4)
-    return `${x},${y}`
-  }).join(' ')
-  svgEl.innerHTML = ''
-  const ns = 'http://www.w3.org/2000/svg'
-  const poly = document.createElementNS(ns, 'polyline')
-  poly.setAttribute('points', coords)
-  poly.setAttribute('fill', 'none')
-  poly.setAttribute('stroke', '#37e67d')
-  poly.setAttribute('stroke-width', '2')
-  svgEl.appendChild(poly)
-}
-
-// focus the hidden input without scrolling the page (useful for mobile)
-function focusInputSilently() {
-  try {
-    const elInput = el.hiddenInput
-    if (!elInput) return
-    const prevScroll = { x: window.scrollX, y: window.scrollY }
-    elInput.focus({ preventScroll: true })
-    window.scrollTo(prevScroll.x, prevScroll.y)
-  } catch (e) {
-    // fallback
-    try { el.hiddenInput.focus() } catch (_) {}
-  }
-}
-
-// event wiring
-function wireEvents() {
-  // input element change
-  if (el.hiddenInput) {
-    el.hiddenInput.addEventListener('input', (ev) => {
-      const v = ev.target.value
-      // forward to engine
-      engine.processInput(v)
-      // clear input field if the engine consumed a space (so user continues typing)
-      if (v.endsWith(' ')) {
-        // small debounce to allow onUpdateWordState to render
-        setTimeout(() => { el.hiddenInput.value = '' }, 0)
+    // record via Data if present
+    if (has.Data) {
+      try {
+        const rec = {
+          wpm: stats.wpm || 0,
+          accuracy: stats.accuracy || 0,
+          raw: stats.raw || 0,
+          elapsed: stats.elapsed || (stats.timeLeft ? ( (has.Timer && Timer.getProgress) ? Math.round(Timer.getProgress()* (Timer.getProgress && Timer.getProgress()) ) : 0 : 0),
+          mode: has.Modes ? Modes.getMode() : 'english',
+          timeLimit: stats.timeLimit || (has.Timer && Timer.setDuration ? undefined : undefined),
+          history: stats.history || []
+        };
+        Data.recordRun && Data.recordRun(rec);
+      } catch (e) {
+        console.warn('[main] failed to record run', e);
       }
-    })
-
-    // also capture keydown for raw keystroke handling (backspace etc.)
-    el.hiddenInput.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape') {
-        // abort test
-        resetAndNewTest()
-      }
-      // we allow default handling for letters; but we still forward non-character keys
-      if (ev.key === 'Backspace') {
-        engine.processKeystroke('Backspace')
-        // let the input element handle its own deletion as well
-      }
-    })
-  }
-
-  // restart/new test button
-  if (el.btnRestart) {
-    el.btnRestart.addEventListener('click', () => {
-      resetAndNewTest()
-      // re-focus input
-      setTimeout(() => focusInputSilently(), 40)
-    })
-  }
-
-  // time select
-  if (el.selectTime) {
-    el.selectTime.addEventListener('change', (ev) => {
-      const sec = Number(ev.target.value)
-      engine.setTimeLimit(sec)
-      if (el.timeValue) el.timeValue.textContent = `${sec}s`
-      resetAndNewTest()
-    })
-  }
-
-  // mode select
-  if (el.selectMode) {
-    el.selectMode.addEventListener('change', (ev) => {
-      const mode = ev.target.value
-      engine.setMode(mode)
-      resetAndNewTest()
-    })
-  }
-
-  // capture clicks on the word stream to focus input
-  if (el.wordStream) {
-    el.wordStream.addEventListener('click', () => {
-      focusInputSilently()
-    })
-  }
-
-  // global keyboard shortcut to focus
-  window.addEventListener('keydown', (ev) => {
-    if (['Shift', 'Control', 'Alt', 'Meta'].includes(ev.key)) return
-    // if typing already, do nothing; otherwise focus hidden input when user starts typing
-    if (document.activeElement !== el.hiddenInput) {
-      focusInputSilently()
     }
-  })
-}
-
-// reset engine and UI and hide results
-function resetAndNewTest() {
-  engine.resetTest()
-  if (el.resultsOverlay) el.resultsOverlay.style.display = 'none'
-  // render initial words and stats
-  renderWordStream(engine.getCurrentWordState())
-  renderStats()
-  // clear input box
-  if (el.hiddenInput) el.hiddenInput.value = ''
-  // stop timer if active
-  stopUITimer()
-}
-
-// initialize run
-function init() {
-  renderStats()
-  renderWordStream(engine.getCurrentWordState())
-  wireEvents()
-  // set initial selects if present
-  if (el.selectTime) el.selectTime.value = String(engine.timeLimit)
-  if (el.selectMode) el.selectMode.value = engine.mode
-  // focus input
-  focusInputSilently()
-
-  // precaution: if user clicks outside, keep input focused for quick typing
-  document.addEventListener('click', (ev) => {
-    if (!ev.target.closest('#results-overlay')) {
-      focusInputSilently()
+    // play finish sound
+    if (has.Sounds) {
+      try { Sounds.playFinish(); } catch (e) {}
     }
-  })
-}
+  }
 
-// run init
-init()
+  // Hook Typing events if Typing has callbacks or event hooks
+  function wireTypingEvents() {
+    if (!has.Typing) return;
+    try {
+      // two styles of Typing implementations exist in this project:
+      // 1) Typing exposes start/reset and its own input listener (IIFE)
+      // 2) TypingEngine module exposes onStart/onTick/onUpdateWordState/onFinish
+      // We'll support both styles.
 
-// expose for debugging on window
-window._sebtype = { engine, renderStats, resetAndNewTest, focusInputSilently }
+      // if engine-style with hooks:
+      if (typeof Typing.onFinish === 'function' || typeof Typing.onFinish === 'undefined') {
+        // safe set if available
+        try { Typing.onFinish = (stats) => onTestFinish(stats); } catch (e) {}
+        try { Typing.onTick = (payload) => updateHud(payload); } catch (e) {}
+        try { Typing.onUpdateWordState = (state) => {
+          // if the Typing module already renders the word area we don't need to re-render.
+          // But in case it doesn't, we'll render simple inline fallback:
+          if (el.wordStream && state && typeof state.word === 'string') {
+            // minimal rendering: show few words around
+            if (!state._renderedByTyping) {
+              el.wordStream.innerHTML = '';
+              const start = Math.max(0, (Typing.words ? Typing.currentWordIndex : 0) - 3);
+              const list = Typing.words || Modes.generate ? (Typing.words || (has.Modes ? Modes.generate(120) : [])) : [];
+              const win = list.slice(0, 40);
+              win.forEach((w,i)=>{
+                const span = document.createElement('span');
+                span.className = 'word';
+                span.textContent = w + ' ';
+                el.wordStream.appendChild(span);
+              });
+            }
+          }
+        }} catch (e) {}
+      }
+
+      // If Typing exposes events differently (e.g., returns custom event registration), try common function names:
+      if (typeof Typing.addEventListener === 'function') {
+        try {
+          Typing.addEventListener('finish', onTestFinish);
+          Typing.addEventListener('tick', (payload) => updateHud(payload));
+        } catch (e) {}
+      }
+
+      // If Typing expects raw input forwarded, bind our hidden input to Typing.processInput or Typing.handleInput
+      if (el.hiddenInput) {
+        el.hiddenInput.addEventListener('input', (ev) => {
+          const v = ev.target.value;
+          // call Typing.processInput if available
+          if (typeof Typing.processInput === 'function') {
+            try { Typing.processInput(v); } catch (e) {}
+          } else if (typeof Typing.handleInput === 'function') {
+            try { Typing.handleInput({ target: { value: v } }); } catch (e) {}
+          } else {
+            // fallback: if Typing.start exists but no process method, just rely on typing's own input handler
+          }
+          // if engine consumed a space, clear input to keep typing flow
+          if (v.endsWith(' ')) {
+            setTimeout(() => { el.hiddenInput.value = ''; }, 0);
+          }
+          // play key sound on input
+          if (has.Sounds) {
+            try { Sounds.playKey(); } catch (e) {}
+          }
+        });
+
+        // also forward keydown for Backspace / Escape handling
+        el.hiddenInput.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Escape') {
+            // stop or reset
+            if (typeof Typing.reset === 'function') Typing.reset();
+            if (typeof Timer.stop === 'function') Timer.stop();
+            hideResultsPanel();
+          }
+          if (ev.key === 'Backspace') {
+            if (typeof Typing.processKeystroke === 'function') {
+              try { Typing.processKeystroke('Backspace'); } catch (e) {}
+            }
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[main] wireTypingEvents failed', e);
+    }
+  }
+
+  // Restart/Reset handler
+  function wireRestart() {
+    if (!el.restartBtn) return;
+    el.restartBtn.addEventListener('click', () => {
+      // hide results and reset modules
+      hideResultsPanel();
+      if (has.Typing && typeof Typing.reset === 'function') Typing.reset();
+      if (has.Graph && typeof Graph.clear === 'function') Graph.clear();
+      if (has.Timer && typeof Timer.stop === 'function') Timer.stop();
+      // clear input and focus
+      if (el.hiddenInput) el.hiddenInput.value = '';
+      focusInputSilently();
+      // play a small click
+      if (has.Sounds) try { Sounds.playKey(); } catch (e) {}
+    });
+  }
+
+  // Hook up Nav buttons
+  function wireNavButtons() {
+    if (el.btnModes) {
+      el.btnModes.addEventListener('click', (e) => {
+        openModesPanel();
+      });
+    }
+    if (el.btnSettings) {
+      el.btnSettings.addEventListener('click', (e) => {
+        openSettingsPanel();
+      });
+    }
+    if (el.btnStats) {
+      el.btnStats.addEventListener('click', (e) => {
+        openStatsPanel();
+      });
+    }
+  }
+
+  // If Typing provides an onFinish callback field (object-style engine), set it to our handler.
+  function attachFinishHookIfPossible() {
+    if (!has.Typing) return;
+    try {
+      if (typeof Typing.onFinish === 'undefined') {
+        Typing.onFinish = (stats) => onTestFinish(stats);
+      } else if (typeof Typing.onFinish === 'function') {
+        // override but call previous if present
+        const prev = Typing.onFinish;
+        Typing.onFinish = function (stats) {
+          try { prev(stats); } catch (e) {}
+          onTestFinish(stats);
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // Initialize everything
+  function init() {
+    ensureBaseUI();
+    wireNavButtons();
+    wireTypingEvents();
+    wireRestart();
+    attachFinishHookIfPossible();
+
+    // Graph init if available
+    if (has.Graph && typeof Graph.init === 'function') {
+      try { Graph.init(); } catch (e) { console.warn('[main] Graph.init failed', e); }
+    }
+
+    // Timer init update display
+    if (has.Timer && typeof Timer.init === 'function') {
+      try { Timer.init(); } catch (e) { /* ignore */ }
+    }
+
+    // Settings init
+    if (has.Settings && typeof Settings.init === 'function') {
+      try { Settings.init(); } catch (e) {}
+    }
+
+    // Modes init
+    if (has.Modes && typeof Modes.init === 'function') {
+      try { Modes.init(); } catch (e) {}
+    }
+
+    // Focus input when user hits any typing key (quickstart)
+    document.addEventListener('keydown', (ev) => {
+      // ignore modifier-only keys
+      if (['Shift','Control','Alt','Meta'].includes(ev.key)) return;
+      // if user isn't already typing into input, focus it
+      if (document.activeElement !== el.hiddenInput) {
+        focusInputSilently();
+      }
+    });
+
+    // Click word area focuses input
+    if (el.wordStream) {
+      el.wordStream.addEventListener('click', focusInputSilently);
+    }
+
+    // initial HUD update
+    updateHud({ timeLeft: (has.Timer && Timer.getProgress) ? Math.round((1 - Timer.getProgress())* (Timer.getProgress && Timer.getProgress())) : null, accuracy: null });
+    console.log('%c[main] SebType main.js initialized', 'color:#37e67d');
+  }
+
+  // run init on DOM ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    setTimeout(init, 0);
+  }
+
+  // expose for debug
+  window.SebMain = {
+    init,
+    openModesPanel,
+    openSettingsPanel,
+    openStatsPanel,
+    focusInputSilently
+  };
+
+})();
